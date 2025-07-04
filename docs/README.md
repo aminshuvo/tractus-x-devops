@@ -279,16 +279,16 @@ Environment-specific configurations are managed through:
    ```
 
 ### Getting Help
-- Check the [Troubleshooting Guide](TROUBLESHOOTING.md)
+- Check the [Troubleshooting Guide](./docs/TROUBLESHOOTING.md)
 - Review application logs using Grafana/Loki
 - Examine Prometheus alerts for system issues
 
 ## 📚 Documentation
 
-- [Setup Instructions](SETUP.md) - Detailed setup and configuration
-- [Operational Playbook](OPERATIONAL-PLAYBOOK.md) - Production operations guide
-- [Architecture Documentation](ARCHITECTURE.md) - System architecture and design
-- [Troubleshooting Guide](TROUBLESHOOTING.md) - Common issues and solutions
+- [Setup Instructions](./docs/SETUP.md) - Detailed setup and configuration
+- [Operational Playbook](./docs/OPERATIONAL-PLAYBOOK.md) - Production operations guide
+- [Architecture Documentation](./docs/ARCHITECTURE.md) - System architecture and design
+- [Troubleshooting Guide](./docs/TROUBLESHOOTING.md) - Common issues and solutions
 
 ## 🤝 Contributing
 
@@ -446,4 +446,4 @@ ARGOCD_TARGET_REVISION=HEAD
 
 ---
 
-**Note**: This deployment is designed for development and testing purposes. For production deployments, please review the [Operational Playbook](OPERATIONAL-PLAYBOOK.md) for additional security and reliability considerations.
+**Note**: This deployment is designed for development and testing purposes. For production deployments, please review the [Operational Playbook](./docs/OPERATIONAL-PLAYBOOK.md) for additional security and reliability considerations.
