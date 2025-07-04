@@ -1,0 +1,362 @@
+# kubernetes/argocd/applications/tractus-x-umbrella.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tractus-x-umbrella
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: tractus-x-umbrella
+    app.kubernetes.io/component: dataspace
+    app.kubernetes.io/part-of: tractus-x
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: tractus-x
+  source:
+    repoURL: https://eclipse-tractusx.github.io/charts/dev
+    chart: umbrella
+    targetRevision: "24.08.1"
+    helm:
+      releaseName: tractus-x
+      valueFiles:
+        - values.yaml
+      values: |
+        global:
+          domain: minikube.local
+          enablePrometheus: true
+          enableGrafana: false  # We use our own monitoring stack
+          
+        # Central Identity Provider
+        centralidp:
+          enabled: true
+          keycloak:
+            auth:
+              adminUser: admin
+              adminPassword: tractus-admin
+            postgresql:
+              auth:
+                password: keycloak-db-password
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "250m"
+              limits:
+                memory: "1Gi"
+                cpu: "500m"
+        
+        # Managed Identity Wallet
+        managed-identity-wallet:
+          enabled: true
+          miw:
+            host: miw.minikube.local
+            encryptionKey: "mySecretEncryptionKey"
+            authorityWallet:
+              did: "did:web:minikube.local"
+              bpn: "BPNL000000000000"
+          postgresql:
+            auth:
+              password: miw-db-password
+        
+        # Portal & Marketplace
+        portal:
+          enabled: true
+          frontend:
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: portal.minikube.local
+                  paths:
+                    - path: /
+                      pathType: Prefix
+          backend:
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: portal-backend.minikube.local
+                  paths:
+                    - path: /
+                      pathType: Prefix
+            keycloak:
+              central:
+                clientId: "central-client"
+                clientSecret: "central-client-secret"
+              shared:
+                clientId: "shared-client"
+                clientSecret: "shared-client-secret"
+        
+        # Business Partner Data Management
+        bpdm:
+          enabled: true
+          pool:
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: bpdm-pool.minikube.local
+                  paths:
+                    - path: /
+                      pathType: Prefix
+          gate:
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: bpdm-gate.minikube.local
+                  paths:
+                    - path: /
+                      pathType: Prefix
+        
+        # Digital Twin Registry
+        digital-twin-registry:
+          enabled: true
+          ingress:
+            enabled: true
+            className: nginx
+            hosts:
+              - host: dtr.minikube.local
+                paths:
+                  - path: /
+                    pathType: Prefix
+          postgresql:
+            auth:
+              password: dtr-db-password
+        
+        # Simple Data Exchanger - EDC Consumer
+        dataconsumerOne:
+          enabled: true
+          participant:
+            id: "BPNL00000003CRHK"
+          controlplane:
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: dataconsumer-controlplane.minikube.local
+                  paths:
+                    - path: /
+                      pathType: Prefix
+            endpoints:
+              management:
+                authKey: "consumer-management-key"
+              protocol:
+                authKey: "consumer-protocol-key"
+            env:
+              EDC_CONNECTOR_NAME: "dataconsumer-one"
+              EDC_PARTICIPANT_ID: "BPNL00000003CRHK"
+              EDC_VAULT_HASHICORP_URL: "http://vault:8200"
+              EDC_VAULT_HASHICORP_TOKEN: "root"
+              # JDK 21 optimizations
+              JAVA_OPTS: "-Xms512m -Xmx1024m -XX:+UseZGC -XX:+UnlockExperimentalVMOptions"
+          dataplane:
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: dataconsumer-dataplane.minikube.local
+                  paths:
+                    - path: /
+                      pathType: Prefix
+        
+        # TX Data Provider - EDC Provider
+        tx-data-provider:
+          enabled: true
+          participant:
+            id: "BPNL00000003CNKC"
+          controlplane:
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: dataprovider-controlplane.minikube.local
+                  paths:
+                    - path: /
+                      pathType: Prefix
+            endpoints:
+              management:
+                authKey: "provider-management-key"
+              protocol:
+                authKey: "provider-protocol-key"
+            env:
+              EDC_CONNECTOR_NAME: "tx-data-provider"
+              EDC_PARTICIPANT_ID: "BPNL00000003CNKC"
+              EDC_VAULT_HASHICORP_URL: "http://vault:8200"
+              EDC_VAULT_HASHICORP_TOKEN: "root"
+              # JDK 21 optimizations
+              JAVA_OPTS: "-Xms512m -Xmx1024m -XX:+UseZGC -XX:+UnlockExperimentalVMOptions"
+          dataplane:
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: dataprovider-dataplane.minikube.local
+                  paths:
+                    - path: /
+                      pathType: Prefix
+        
+        # HashiCorp Vault
+        vault:
+          enabled: true
+          server:
+            dev:
+              enabled: true
+              devRootToken: "root"
+            ingress:
+              enabled: true
+              ingressClassName: nginx
+              hosts:
+                - host: vault.minikube.local
+                  paths:
+                    - /
+        
+        # PostgreSQL
+        postgresql:
+          enabled: true
+          auth:
+            postgresPassword: "tractus-admin"
+            database: "tractus"
+          primary:
+            persistence:
+              size: 10Gi
+              storageClass: "standard"
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "250m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+        
+        # PgAdmin4 for database management
+        pgadmin4:
+          enabled: true
+          env:
+            email: admin@tractus-x.org
+            password: tractus-admin
+          ingress:
+            enabled: true
+            ingressClassName: nginx
+            hosts:
+              - host: pgadmin.minikube.local
+                paths:
+                  - path: /
+                    pathType: Prefix
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tractus-x
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  revisionHistoryLimit: 3
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: ""
+      kind: Service
+      jsonPointers:
+        - /spec/clusterIP
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: tractus-x
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: tractus-x-project
+    app.kubernetes.io/part-of: tractus-x
+spec:
+  description: Tractus-X Automotive Dataspace Project
+  
+  sourceRepos:
+    - 'https://eclipse-tractusx.github.io/charts/dev'
+    - 'https://eclipse-tractusx.github.io/charts/stable'
+    - 'https://github.com/aminshuvo/tractus-x-devops'
+    - '*'  # Allow all repositories for development
+  
+  destinations:
+    - namespace: tractus-x
+      server: https://kubernetes.default.svc
+    - namespace: edc-standalone
+      server: https://kubernetes.default.svc
+    - namespace: monitoring
+      server: https://kubernetes.default.svc
+  
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: ''
+      kind: PersistentVolume
+    - group: storage.k8s.io
+      kind: StorageClass
+    - group: networking.k8s.io
+      kind: IngressClass
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+  
+  namespaceResourceWhitelist:
+    - group: ''
+      kind: '*'
+    - group: apps
+      kind: '*'
+    - group: extensions
+      kind: '*'
+    - group: networking.k8s.io
+      kind: '*'
+    - group: policy
+      kind: '*'
+    - group: rbac.authorization.k8s.io
+      kind: '*'
+    - group: autoscaling
+      kind: '*'
+    - group: batch
+      kind: '*'
+  
+  roles:
+    - name: admin
+      description: Full access to Tractus-X applications
+      policies:
+        - p, proj:tractus-x:admin, applications, *, tractus-x/*, allow
+        - p, proj:tractus-x:admin, repositories, *, *, allow
+        - p, proj:tractus-x:admin, certificates, *, *, allow
+      groups:
+        - tractus-x:admin
+    
+    - name: developer
+      description: Developer access to Tractus-X applications
+      policies:
+        - p, proj:tractus-x:developer, applications, get, tractus-x/*, allow
+        - p, proj:tractus-x:developer, applications, sync, tractus-x/*, allow
+        - p, proj:tractus-x:developer, repositories, get, *, allow
+      groups:
+        - tractus-x:developer
+    
+    - name: readonly
+      description: Read-only access to Tractus-X applications
+      policies:
+        - p, proj:tractus-x:readonly, applications, get, tractus-x/*, allow
+        - p, proj:tractus-x:readonly, repositories, get, *, allow
+      groups:
+        - tractus-x:readonly

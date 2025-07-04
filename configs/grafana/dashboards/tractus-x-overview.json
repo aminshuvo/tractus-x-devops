@@ -1,0 +1,80 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "tractus-x-overview",
+    "title": "Tractus-X Overview",
+    "tags": ["tractus-x", "edc", "kubernetes"],
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Cluster Resource Usage",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\"}[5m]))",
+            "legendFormat": "CPU Usage"
+          },
+          {
+            "expr": "sum(container_memory_working_set_bytes{container!=\"\"}) / 1024 / 1024 / 1024",
+            "legendFormat": "Memory Usage (GB)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Pod Status",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "kube_pod_info",
+            "legendFormat": "{{namespace}}/{{pod}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "EDC Connector Health",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"tractus-x-edc\"}",
+            "legendFormat": "{{instance}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "HTTP Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total[5m])) by (service)",
+            "legendFormat": "{{service}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) by (service)",
+            "legendFormat": "5xx {{service}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8}
+      }
+    ]
+  }
+}

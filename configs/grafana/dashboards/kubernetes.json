@@ -1,0 +1,64 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "kubernetes-cluster",
+    "title": "Kubernetes Cluster",
+    "tags": ["kubernetes", "cluster"],
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Cluster CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\"}[5m])) by (node)",
+            "legendFormat": "{{node}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Cluster Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(container_memory_working_set_bytes{container!=\"\"}) by (node) / 1024 / 1024 / 1024",
+            "legendFormat": "{{node}} Memory (GB)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Pod Count by Namespace",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(kube_pod_info) by (namespace)",
+            "legendFormat": "{{namespace}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Node Resource Capacity",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "kube_node_status_capacity",
+            "legendFormat": "{{node}} - {{resource}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      }
+    ]
+  }
+}

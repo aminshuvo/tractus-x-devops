@@ -1,0 +1,323 @@
+name: Infrastructure Deployment
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'terraform/**'
+      - 'scripts/setup-minikube.sh'
+      - '.github/workflows/infrastructure.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - 'scripts/setup-minikube.sh'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      destroy:
+        description: 'Destroy infrastructure'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TF_VERSION: '1.5.7'
+  KUBECTL_VERSION: 'v1.24.0'
+  HELM_VERSION: 'v3.12.3'
+  MINIKUBE_VERSION: 'v1.31.2'
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [development, staging]
+    
+    outputs:
+      plan-development: ${{ steps.plan-development.outputs.stdout }}
+      plan-staging: ${{ steps.plan-staging.outputs.stdout }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup Minikube
+        uses: medyagh/setup-minikube@v0.0.14
+        with:
+          minikube-version: ${{ env.MINIKUBE_VERSION }}
+          driver: docker
+          container-runtime: containerd
+
+      - name: Cache Terraform
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.terraform.d/
+            terraform/.terraform/
+          key: terraform-${{ runner.os }}-${{ hashFiles('terraform/.terraform.lock.hcl') }}
+          restore-keys: |
+            terraform-${{ runner.os }}-
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Plan - ${{ matrix.environment }}
+        id: plan-${{ matrix.environment }}
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -var-file="environments/${{ matrix.environment }}.tfvars" \
+            -var="environment=${{ matrix.environment }}" \
+            -no-color \
+            -out=tfplan-${{ matrix.environment }}
+        continue-on-error: true
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: tfplan-${{ matrix.environment }}
+          path: terraform/tfplan-${{ matrix.environment }}
+          retention-days: 5
+
+      - name: Comment PR - Plan Results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/tfplan-${{ matrix.environment }}', 'utf8');
+            
+            const output = `#### Terraform Plan Results - ${{ matrix.environment }} 📋
+            
+            \`\`\`terraform
+            ${plan}
+            \`\`\`
+            
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    
+    strategy:
+      matrix:
+        environment: [development, staging]
+        exclude:
+          - environment: ${{ github.ref != 'refs/heads/main' && 'staging' || '' }}
+    
+    environment:
+      name: ${{ matrix.environment }}
+      url: https://argocd.${{ matrix.environment == 'development' && 'minikube.local' || format('{0}.example.com', matrix.environment) }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup Minikube
+        uses: medyagh/setup-minikube@v0.0.14
+        with:
+          minikube-version: ${{ env.MINIKUBE_VERSION }}
+          driver: docker
+          container-runtime: containerd
+          cpus: ${{ matrix.environment == 'development' && '4' || '6' }}
+          memory: ${{ matrix.environment == 'development' && '8192' || '12288' }}
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v3
+        with:
+          name: tfplan-${{ matrix.environment }}
+          path: terraform/
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Apply
+        if: ${{ !github.event.inputs.destroy }}
+        working-directory: terraform
+        run: |
+          terraform apply \
+            -auto-approve \
+            tfplan-${{ matrix.environment }}
+
+      - name: Terraform Destroy
+        if: ${{ github.event.inputs.destroy == 'true' }}
+        working-directory: terraform
+        run: |
+          terraform destroy \
+            -var-file="environments/${{ matrix.environment }}.tfvars" \
+            -var="environment=${{ matrix.environment }}" \
+            -auto-approve
+
+      - name: Verify Infrastructure
+        if: ${{ !github.event.inputs.destroy }}
+        run: |
+          # Wait for cluster to be ready
+          kubectl wait --for=condition=Ready nodes --all --timeout=300s
+          
+          # Verify namespaces
+          kubectl get namespaces | grep -E "(tractus-x|edc-standalone|monitoring|argocd)"
+          
+          # Verify ArgoCD installation
+          kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd
+          
+          # Get ArgoCD admin password
+          ARGOCD_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+          echo "ArgoCD admin password: $ARGOCD_PASSWORD"
+
+      - name: Export Kubeconfig
+        if: ${{ !github.event.inputs.destroy }}
+        run: |
+          mkdir -p ~/.kube
+          minikube kubectl -- config view --raw > ~/.kube/config-${{ matrix.environment }}
+          
+      - name: Upload Kubeconfig
+        if: ${{ !github.event.inputs.destroy }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: kubeconfig-${{ matrix.environment }}
+          path: ~/.kube/config-${{ matrix.environment }}
+          retention-days: 1
+
+      - name: Setup ArgoCD CLI
+        if: ${{ !github.event.inputs.destroy }}
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd-linux-amd64
+          sudo mv argocd-linux-amd64 /usr/local/bin/argocd
+
+      - name: Configure ArgoCD
+        if: ${{ !github.event.inputs.destroy }}
+        run: |
+          # Port forward ArgoCD server
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 &
+          sleep 10
+          
+          # Login to ArgoCD
+          ARGOCD_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+          argocd login localhost:8080 --username admin --password $ARGOCD_PASSWORD --insecure
+          
+          # Create ArgoCD projects and applications will be done in subsequent workflows
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'terraform/'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: json
+          output_file_path: checkov-results.json
+
+      - name: Upload Checkov results
+        uses: actions/upload-artifact@v3
+        with:
+          name: checkov-results
+          path: checkov-results.json
+
+  notify:
+    name: Notify Teams
+    runs-on: ubuntu-latest
+    needs: [terraform-plan, terraform-apply]
+    if: always()
+    
+    steps:
+      - name: Notify Success
+        if: needs.terraform-apply.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: "Infrastructure deployment completed successfully for ${{ matrix.environment }}"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Notify Failure
+        if: needs.terraform-apply.result == 'failure'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: "Infrastructure deployment failed for ${{ matrix.environment }}"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}

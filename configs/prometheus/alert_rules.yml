@@ -1,0 +1,47 @@
+groups:
+  - name: tractus-x.rules
+    rules:
+      - alert: PodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.pod }} is crash looping"
+          description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is restarting frequently"
+
+      - alert: PodNotReady
+        expr: kube_pod_status_ready{condition="false"} > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pod {{ $labels.pod }} not ready"
+          description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been not ready for more than 10 minutes"
+
+      - alert: EDCConnectorDown
+        expr: up{job="tractus-x-edc"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EDC Connector is down"
+          description: "EDC Connector {{ $labels.instance }} has been down for more than 5 minutes"
+
+      - alert: HighMemoryUsage
+        expr: (container_memory_working_set_bytes / container_spec_memory_limit_bytes) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage in {{ $labels.pod }}"
+          description: "Container {{ $labels.container }} in pod {{ $labels.pod }} is using more than 90% of its memory limit"
+
+      - alert: HighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total[5m]) > 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage in {{ $labels.pod }}"
+          description: "Container {{ $labels.container }} in pod {{ $labels.pod }} is using more than 80% CPU"

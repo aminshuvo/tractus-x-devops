@@ -1,0 +1,426 @@
+name: Deploy Tractus-X Umbrella
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'kubernetes/argocd/applications/tractus-x-umbrella.yaml'
+      - 'kubernetes/tractus-x/**'
+      - '.github/workflows/deploy-umbrella.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'kubernetes/argocd/applications/tractus-x-umbrella.yaml'
+      - 'kubernetes/tractus-x/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      force_sync:
+        description: 'Force sync ArgoCD application'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  ARGOCD_VERSION: 'v2.8.4'
+
+jobs:
+  validate-manifests:
+    name: Validate Kubernetes Manifests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.24.0'
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.3'
+
+      - name: Add Helm repositories
+        run: |
+          helm repo add tractusx-dev https://eclipse-tractusx.github.io/charts/dev
+          helm repo add tractusx https://eclipse-tractusx.github.io/charts/stable
+          helm repo update
+
+      - name: Validate Helm templates
+        run: |
+          # Extract values from ArgoCD application
+          VALUES_FILE=$(mktemp)
+          yq eval '.spec.source.helm.values' kubernetes/argocd/applications/tractus-x-umbrella.yaml > "$VALUES_FILE"
+          
+          # Template the chart
+          helm template tractus-x tractusx-dev/umbrella \
+            --version 24.08.1 \
+            --values "$VALUES_FILE" \
+            --debug \
+            --dry-run > /tmp/manifests.yaml
+          
+          echo "✅ Helm templates are valid"
+
+      - name: Validate Kubernetes manifests
+        run: |
+          # Validate YAML syntax
+          kubectl apply --dry-run=client --validate=true -f /tmp/manifests.yaml
+          echo "✅ Kubernetes manifests are valid"
+
+      - name: Security scan with Kubesec
+        run: |
+          curl -sSL https://get.kubesec.io/kubesec | tar -xzf -
+          ./kubesec scan /tmp/manifests.yaml
+          echo "✅ Security scan completed"
+
+      - name: Lint with kube-score
+        run: |
+          curl -L https://github.com/zegl/kube-score/releases/latest/download/kube-score_$(uname -s)_$(uname -m).tar.gz | tar -xzf -
+          ./kube-score score /tmp/manifests.yaml
+          echo "✅ Linting completed"
+
+  deploy-to-development:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: validate-manifests
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'development')
+    
+    environment:
+      name: development
+      url: https://portal.minikube.local
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup ArgoCD CLI
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/download/${{ env.ARGOCD_VERSION }}/argocd-linux-amd64
+          chmod +x argocd-linux-amd64
+          sudo mv argocd-linux-amd64 /usr/local/bin/argocd
+
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v3
+        with:
+          name: kubeconfig-development
+          path: ~/.kube/
+        continue-on-error: true
+
+      - name: Setup kubectl context
+        run: |
+          if [ -f ~/.kube/config-development ]; then
+            export KUBECONFIG=~/.kube/config-development
+            kubectl config use-context tractus-x-development
+          else
+            echo "Kubeconfig not found, skipping kubectl setup"
+          fi
+
+      - name: Deploy ArgoCD Application
+        run: |
+          # Apply ArgoCD application manifest
+          kubectl apply -f kubernetes/argocd/applications/tractus-x-umbrella.yaml
+          
+          echo "✅ ArgoCD application deployed"
+
+      - name: Wait for ArgoCD sync
+        run: |
+          # Wait for application to be healthy
+          timeout 1800 bash -c '
+            while true; do
+              STATUS=$(kubectl get application tractus-x-umbrella -n argocd -o jsonpath="{.status.health.status}")
+              SYNC_STATUS=$(kubectl get application tractus-x-umbrella -n argocd -o jsonpath="{.status.sync.status}")
+              
+              echo "App Health: $STATUS, Sync Status: $SYNC_STATUS"
+              
+              if [[ "$STATUS" == "Healthy" && "$SYNC_STATUS" == "Synced" ]]; then
+                echo "Application is healthy and synced!"
+                break
+              fi
+              
+              sleep 30
+            done
+          '
+
+      - name: Verify deployment
+        run: |
+          # Check all pods are running
+          kubectl get pods -n tractus-x
+          
+          # Wait for main components
+          kubectl wait --for=condition=Ready pods -l app=edc-controlplane -n tractus-x --timeout=300s
+          kubectl wait --for=condition=Ready pods -l app=portal-frontend -n tractus-x --timeout=300s
+          kubectl wait --for=condition=Ready pods -l app=centralidp -n tractus-x --timeout=300s
+          
+          echo "✅ Deployment verification completed"
+
+      - name: Run health checks
+        run: |
+          # Port forward and test endpoints
+          kubectl port-forward svc/tx-data-provider-controlplane 8080:8080 -n tractus-x &
+          sleep 10
+          
+          # Test EDC health
+          curl -f http://localhost:8080/api/check/health || echo "⚠️ EDC health check failed"
+          
+          # Kill port-forward
+          pkill -f "kubectl port-forward" || true
+          
+          echo "✅ Health checks completed"
+
+  deploy-to-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [validate-manifests, deploy-to-development]
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    
+    environment:
+      name: staging
+      url: https://portal.staging.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup ArgoCD CLI
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/download/${{ env.ARGOCD_VERSION }}/argocd-linux-amd64
+          chmod +x argocd-linux-amd64
+          sudo mv argocd-linux-amd64 /usr/local/bin/argocd
+
+      - name: Deploy to Staging
+        run: |
+          # Update ArgoCD application for staging
+          sed 's/minikube.local/staging.example.com/g' kubernetes/argocd/applications/tractus-x-umbrella.yaml | \
+          kubectl apply -f -
+          
+          echo "✅ Deployed to staging"
+
+  deploy-to-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [validate-manifests, deploy-to-staging]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    environment:
+      name: production
+      url: https://portal.tractus-x.org
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Manual approval required
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: tractus-x-admins
+          minimum-approvals: 2
+          issue-title: "Deploy Tractus-X to Production"
+          issue-body: |
+            Please review and approve the deployment to production.
+            
+            **Changes:**
+            ${{ github.event.head_commit.message }}
+            
+            **Commit:** ${{ github.sha }}
+            **Author:** ${{ github.actor }}
+
+      - name: Setup ArgoCD CLI
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/download/${{ env.ARGOCD_VERSION }}/argocd-linux-amd64
+          chmod +x argocd-linux-amd64
+          sudo mv argocd-linux-amd64 /usr/local/bin/argocd
+
+      - name: Deploy to Production
+        run: |
+          # Update ArgoCD application for production
+          sed 's/minikube.local/tractus-x.org/g' kubernetes/argocd/applications/tractus-x-umbrella.yaml | \
+          kubectl apply -f -
+          
+          echo "✅ Deployed to production"
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy-to-development
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: tests/integration/package-lock.json
+
+      - name: Install test dependencies
+        working-directory: tests/integration
+        run: |
+          npm ci
+
+      - name: Run integration tests
+        working-directory: tests/integration
+        run: |
+          npm test
+        env:
+          TEST_ENVIRONMENT: development
+          PORTAL_URL: https://portal.minikube.local
+          EDC_CONSUMER_URL: https://dataconsumer-controlplane.minikube.local
+          EDC_PROVIDER_URL: https://dataprovider-controlplane.minikube.local
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: integration-test-results
+          path: tests/integration/reports/
+
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: deploy-to-development
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup k6
+        run: |
+          curl https://github.com/grafana/k6/releases/download/v0.47.0/k6-v0.47.0-linux-amd64.tar.gz -L | tar xvz --strip-components 1
+
+      - name: Run performance tests
+        run: |
+          ./k6 run tests/performance/edc-load-test.js \
+            --env PORTAL_URL=https://portal.minikube.local \
+            --env EDC_URL=https://dataconsumer-controlplane.minikube.local
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: performance-test-results
+          path: tests/performance/reports/
+
+  security-tests:
+    name: Security Tests
+    runs-on: ubuntu-latest
+    needs: deploy-to-development
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OWASP ZAP
+        run: |
+          docker pull owasp/zap2docker-stable
+
+      - name: Run security scan
+        run: |
+          docker run -v $(pwd):/zap/wrk/:rw \
+            -t owasp/zap2docker-stable \
+            zap-baseline.py \
+            -t https://portal.minikube.local \
+            -J zap-report.json \
+            -r zap-report.html
+
+      - name: Upload security results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-test-results
+          path: |
+            zap-report.json
+            zap-report.html
+
+  notify:
+    name: Notify Teams
+    runs-on: ubuntu-latest
+    needs: [deploy-to-development, integration-tests]
+    if: always()
+    
+    steps:
+      - name: Notify Success
+        if: needs.deploy-to-development.result == 'success' && needs.integration-tests.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: |
+            🚀 Tractus-X deployment successful!
+            
+            Environment: Development
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+            
+            Portal: https://portal.minikube.local
+            ArgoCD: https://argocd.minikube.local
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Notify Failure
+        if: needs.deploy-to-development.result == 'failure' || needs.integration-tests.result == 'failure'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: |
+            ❌ Tractus-X deployment failed!
+            
+            Environment: Development
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+            
+            Check the workflow for details.
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Create GitHub Issue on Failure
+        if: failure() && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Deployment failure: ${context.sha.substring(0, 7)}`,
+              body: `
+            ## Deployment Failed
+            
+            **Commit:** ${context.sha}
+            **Author:** ${context.actor}
+            **Workflow:** ${context.workflow}
+            **Run ID:** ${context.runId}
+            
+            Please investigate the failure and take necessary action.
+            
+            [View Workflow Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+              `,
+              labels: ['bug', 'deployment', 'critical']
+            });
+
+  cleanup:
+    name: Cleanup Resources
+    runs-on: ubuntu-latest
+    needs: [deploy-to-development, integration-tests, performance-tests, security-tests]
+    if: always() && github.event_name != 'push'
+    
+    steps:
+      - name: Cleanup test resources
+        run: |
+          echo "Cleaning up test resources..."
+          # Add cleanup logic here if needed
+          echo "✅ Cleanup completed"

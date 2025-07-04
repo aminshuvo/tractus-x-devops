@@ -1,0 +1,368 @@
+# kubernetes/argocd/applications/standalone-edc.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: standalone-edc-consumer
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: standalone-edc-consumer
+    app.kubernetes.io/component: edc-connector
+    app.kubernetes.io/part-of: tractus-x
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: tractus-x
+  source:
+    repoURL: https://eclipse-tractusx.github.io/charts/dev
+    chart: tractusx-connector
+    targetRevision: "0.5.3"
+    helm:
+      releaseName: edc-consumer-standalone
+      values: |
+        participant:
+          id: "BPNL00000003ABCD"
+        
+        nameOverride: "edc-consumer-standalone"
+        fullnameOverride: "edc-consumer-standalone"
+        
+        controlplane:
+          enabled: true
+          endpoints:
+            management:
+              port: 8080
+              path: /management
+              authKey: "standalone-consumer-management-key"
+            protocol:
+              port: 8084
+              path: /api/v1/dsp
+              authKey: "standalone-consumer-protocol-key"
+            control:
+              port: 8083
+              path: /control
+            ids:
+              port: 8086
+              path: /api/v1/ids
+          
+          ingress:
+            enabled: true
+            className: nginx
+            annotations:
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            hosts:
+              - host: edc-consumer.minikube.local
+                paths:
+                  - path: /
+                    pathType: Prefix
+          
+          env:
+            # Connector Configuration
+            EDC_CONNECTOR_NAME: "standalone-consumer"
+            EDC_PARTICIPANT_ID: "BPNL00000003ABCD"
+            EDC_HOSTNAME: "edc-consumer.minikube.local"
+            
+            # Data Plane Configuration
+            EDC_DATAPLANE_SELECTOR_DEFAULTPLANE_URL: "http://edc-consumer-standalone-dataplane:8080/control/transfer"
+            EDC_DATAPLANE_SELECTOR_DEFAULTPLANE_SOURCETYPES: "HttpData,HttpProxy"
+            EDC_DATAPLANE_SELECTOR_DEFAULTPLANE_DESTTYPES: "HttpProxy,HttpData"
+            EDC_DATAPLANE_SELECTOR_DEFAULTPLANE_PROPERTIES: '{"publicApiUrl":"http://edc-consumer-dataplane.minikube.local/public"}'
+            
+            # Vault Configuration
+            EDC_VAULT_HASHICORP_URL: "http://vault.tractus-x:8200"
+            EDC_VAULT_HASHICORP_TOKEN: "root"
+            EDC_VAULT_HASHICORP_TIMEOUT_SECONDS: "30"
+            
+            # Database Configuration
+            EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://postgresql.tractus-x:5432/edc_consumer"
+            EDC_DATASOURCE_DEFAULT_USER: "postgres"
+            EDC_DATASOURCE_DEFAULT_PASSWORD: "tractus-admin"
+            
+            # Protocol Configuration
+            EDC_DSP_CALLBACK_ADDRESS: "http://edc-consumer.minikube.local/api/v1/dsp"
+            EDC_IDS_ENDPOINT: "http://edc-consumer.minikube.local/api/v1/ids"
+            
+            # JDK 21 and Spring Boot optimizations
+            JAVA_OPTS: "-Xms512m -Xmx1024m -XX:+UseZGC -XX:+UnlockExperimentalVMOptions --enable-preview"
+            JDK_JAVA_OPTIONS: "--enable-preview"
+            SPRING_PROFILES_ACTIVE: "development"
+          
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          
+          livenessProbe:
+            httpGet:
+              path: /api/check/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          readinessProbe:
+            httpGet:
+              path: /api/check/readiness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+        
+        dataplane:
+          enabled: true
+          endpoints:
+            default:
+              port: 8080
+              path: /api
+            public:
+              port: 8185
+              path: /public
+            control:
+              port: 8083
+              path: /control
+          
+          ingress:
+            enabled: true
+            className: nginx
+            annotations:
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            hosts:
+              - host: edc-consumer-dataplane.minikube.local
+                paths:
+                  - path: /
+                    pathType: Prefix
+          
+          env:
+            # Data Plane Configuration
+            EDC_DATAPLANE_TOKEN_VALIDATION_ENDPOINT: "http://edc-consumer-standalone-controlplane:8083/control/token"
+            EDC_HOSTNAME: "edc-consumer-dataplane.minikube.local"
+            
+            # JDK 21 optimizations
+            JAVA_OPTS: "-Xms256m -Xmx512m -XX:+UseZGC -XX:+UnlockExperimentalVMOptions --enable-preview"
+            JDK_JAVA_OPTIONS: "--enable-preview"
+          
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "125m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+        
+        postgresql:
+          enabled: true
+          auth:
+            database: "edc_consumer"
+            username: "postgres"
+            password: "tractus-admin"
+          primary:
+            persistence:
+              enabled: true
+              size: 5Gi
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "200m"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: edc-standalone
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: standalone-edc-provider
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: standalone-edc-provider
+    app.kubernetes.io/component: edc-connector
+    app.kubernetes.io/part-of: tractus-x
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: tractus-x
+  source:
+    repoURL: https://eclipse-tractusx.github.io/charts/dev
+    chart: tractusx-connector
+    targetRevision: "0.5.3"
+    helm:
+      releaseName: edc-provider-standalone
+      values: |
+        participant:
+          id: "BPNL00000003EFGH"
+        
+        nameOverride: "edc-provider-standalone"
+        fullnameOverride: "edc-provider-standalone"
+        
+        controlplane:
+          enabled: true
+          endpoints:
+            management:
+              port: 8080
+              path: /management
+              authKey: "standalone-provider-management-key"
+            protocol:
+              port: 8084
+              path: /api/v1/dsp
+              authKey: "standalone-provider-protocol-key"
+            control:
+              port: 8083
+              path: /control
+            ids:
+              port: 8086
+              path: /api/v1/ids
+          
+          ingress:
+            enabled: true
+            className: nginx
+            annotations:
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            hosts:
+              - host: edc-provider.minikube.local
+                paths:
+                  - path: /
+                    pathType: Prefix
+          
+          env:
+            # Connector Configuration
+            EDC_CONNECTOR_NAME: "standalone-provider"
+            EDC_PARTICIPANT_ID: "BPNL00000003EFGH"
+            EDC_HOSTNAME: "edc-provider.minikube.local"
+            
+            # Data Plane Configuration
+            EDC_DATAPLANE_SELECTOR_DEFAULTPLANE_URL: "http://edc-provider-standalone-dataplane:8080/control/transfer"
+            EDC_DATAPLANE_SELECTOR_DEFAULTPLANE_SOURCETYPES: "HttpData,HttpProxy"
+            EDC_DATAPLANE_SELECTOR_DEFAULTPLANE_DESTTYPES: "HttpProxy,HttpData"
+            EDC_DATAPLANE_SELECTOR_DEFAULTPLANE_PROPERTIES: '{"publicApiUrl":"http://edc-provider-dataplane.minikube.local/public"}'
+            
+            # Vault Configuration
+            EDC_VAULT_HASHICORP_URL: "http://vault.tractus-x:8200"
+            EDC_VAULT_HASHICORP_TOKEN: "root"
+            EDC_VAULT_HASHICORP_TIMEOUT_SECONDS: "30"
+            
+            # Database Configuration
+            EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://postgresql.tractus-x:5432/edc_provider"
+            EDC_DATASOURCE_DEFAULT_USER: "postgres"
+            EDC_DATASOURCE_DEFAULT_PASSWORD: "tractus-admin"
+            
+            # Protocol Configuration
+            EDC_DSP_CALLBACK_ADDRESS: "http://edc-provider.minikube.local/api/v1/dsp"
+            EDC_IDS_ENDPOINT: "http://edc-provider.minikube.local/api/v1/ids"
+            
+            # JDK 21 and Spring Boot optimizations
+            JAVA_OPTS: "-Xms512m -Xmx1024m -XX:+UseZGC -XX:+UnlockExperimentalVMOptions --enable-preview"
+            JDK_JAVA_OPTIONS: "--enable-preview"
+            SPRING_PROFILES_ACTIVE: "development"
+          
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+        
+        dataplane:
+          enabled: true
+          endpoints:
+            default:
+              port: 8080
+              path: /api
+            public:
+              port: 8185
+              path: /public
+            control:
+              port: 8083
+              path: /control
+          
+          ingress:
+            enabled: true
+            className: nginx
+            annotations:
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            hosts:
+              - host: edc-provider-dataplane.minikube.local
+                paths:
+                  - path: /
+                    pathType: Prefix
+          
+          env:
+            # Data Plane Configuration
+            EDC_DATAPLANE_TOKEN_VALIDATION_ENDPOINT: "http://edc-provider-standalone-controlplane:8083/control/token"
+            EDC_HOSTNAME: "edc-provider-dataplane.minikube.local"
+            
+            # JDK 21 optimizations
+            JAVA_OPTS: "-Xms256m -Xmx512m -XX:+UseZGC -XX:+UnlockExperimentalVMOptions --enable-preview"
+          
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "125m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+        
+        postgresql:
+          enabled: true
+          auth:
+            database: "edc_provider"
+            username: "postgres"
+            password: "tractus-admin"
+          primary:
+            persistence:
+              enabled: true
+              size: 5Gi
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "200m"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: edc-standalone
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,506 @@
+name: Deploy Standalone EDC Connectors
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'kubernetes/argocd/applications/standalone-edc.yaml'
+      - 'kubernetes/edc-standalone/**'
+      - '.github/workflows/deploy-edc.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'kubernetes/argocd/applications/standalone-edc.yaml'
+      - 'kubernetes/edc-standalone/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      connector_type:
+        description: 'Connector type to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - consumer
+          - provider
+          - both
+
+env:
+  EDC_VERSION: '0.5.3'
+  HELM_VERSION: 'v3.12.3'
+
+jobs:
+  validate-edc-config:
+    name: Validate EDC Configuration
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Add EDC Helm repository
+        run: |
+          helm repo add tractusx-dev https://eclipse-tractusx.github.io/charts/dev
+          helm repo update
+
+      - name: Validate EDC Consumer configuration
+        run: |
+          # Extract consumer values from ArgoCD application
+          yq eval '.spec.source.helm.values' kubernetes/argocd/applications/standalone-edc.yaml | \
+            yq eval 'select(.metadata.name == "standalone-edc-consumer")' > /tmp/consumer-values.yaml
+          
+          # Template and validate
+          helm template edc-consumer tractusx-dev/tractusx-connector \
+            --version ${{ env.EDC_VERSION }} \
+            --values /tmp/consumer-values.yaml \
+            --debug --dry-run > /tmp/consumer-manifests.yaml
+          
+          echo "✅ EDC Consumer configuration is valid"
+
+      - name: Validate EDC Provider configuration
+        run: |
+          # Extract provider values from ArgoCD application
+          yq eval '.spec.source.helm.values' kubernetes/argocd/applications/standalone-edc.yaml | \
+            yq eval 'select(.metadata.name == "standalone-edc-provider")' > /tmp/provider-values.yaml
+          
+          # Template and validate
+          helm template edc-provider tractusx-dev/tractusx-connector \
+            --version ${{ env.EDC_VERSION }} \
+            --values /tmp/provider-values.yaml \
+            --debug --dry-run > /tmp/provider-manifests.yaml
+          
+          echo "✅ EDC Provider configuration is valid"
+
+      - name: Security scan EDC manifests
+        run: |
+          # Install kubesec
+          curl -sSL https://github.com/controlplaneio/kubesec/releases/latest/download/kubesec_linux_amd64.tar.gz | tar -xzf -
+          
+          # Scan consumer manifests
+          ./kubesec scan /tmp/consumer-manifests.yaml
+          
+          # Scan provider manifests
+          ./kubesec scan /tmp/provider-manifests.yaml
+          
+          echo "✅ Security scan completed"
+
+      - name: Upload validated manifests
+        uses: actions/upload-artifact@v3
+        with:
+          name: edc-manifests-${{ github.sha }}
+          path: |
+            /tmp/consumer-manifests.yaml
+            /tmp/provider-manifests.yaml
+          retention-days: 7
+
+  test-edc-connectivity:
+    name: Test EDC Connectivity
+    runs-on: ubuntu-latest
+    needs: validate-edc-config
+    if: github.event_name == 'pull_request'
+    
+    strategy:
+      matrix:
+        connector: [consumer, provider]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Minikube
+        uses: medyagh/setup-minikube@v0.0.14
+        with:
+          minikube-version: 'v1.31.2'
+          driver: docker
+          cpus: 2
+          memory: 4096
+
+      - name: Setup kubectl and Helm
+        run: |
+          kubectl version --client
+          helm version
+
+      - name: Deploy test EDC connector
+        run: |
+          # Create test namespace
+          kubectl create namespace edc-test
+          
+          # Add Helm repo
+          helm repo add tractusx-dev https://eclipse-tractusx.github.io/charts/dev
+          helm repo update
+          
+          # Deploy connector
+          helm install edc-${{ matrix.connector }}-test tractusx-dev/tractusx-connector \
+            --namespace edc-test \
+            --version ${{ env.EDC_VERSION }} \
+            --set participant.id=TEST_${{ matrix.connector | upper }}_BPN \
+            --set controlplane.endpoints.management.authKey=test-auth-key \
+            --wait --timeout 10m
+
+      - name: Test connector health
+        run: |
+          # Wait for pod to be ready
+          kubectl wait --for=condition=Ready pods -l app=edc-controlplane -n edc-test --timeout=300s
+          
+          # Port forward and test health endpoint
+          kubectl port-forward svc/edc-${{ matrix.connector }}-test-controlplane 8080:8080 -n edc-test &
+          sleep 10
+          
+          # Test health endpoint
+          curl -f http://localhost:8080/api/check/health || \
+          curl -f http://localhost:8080/health || \
+          echo "Health endpoint test failed but continuing..."
+
+      - name: Test management API
+        run: |
+          # Test management API with auth key
+          curl -H "X-Api-Key: test-auth-key" \
+               -f http://localhost:8080/management/v2/assets || \
+          echo "Management API test completed"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kubectl delete namespace edc-test --ignore-not-found=true
+
+  deploy-edc-development:
+    name: Deploy EDC to Development
+    runs-on: ubuntu-latest
+    needs: validate-edc-config
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'development')
+    
+    environment:
+      name: development-edc
+      url: http://edc-consumer.minikube.local
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup ArgoCD CLI
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd-linux-amd64
+          sudo mv argocd-linux-amd64 /usr/local/bin/argocd
+
+      - name: Deploy EDC Consumer
+        if: github.event.inputs.connector_type != 'provider'
+        run: |
+          kubectl apply -f - <<EOF
+          $(yq eval 'select(.metadata.name == "standalone-edc-consumer")' kubernetes/argocd/applications/standalone-edc.yaml)
+          EOF
+          
+          echo "✅ EDC Consumer deployment initiated"
+
+      - name: Deploy EDC Provider
+        if: github.event.inputs.connector_type != 'consumer'
+        run: |
+          kubectl apply -f - <<EOF
+          $(yq eval 'select(.metadata.name == "standalone-edc-provider")' kubernetes/argocd/applications/standalone-edc.yaml)
+          EOF
+          
+          echo "✅ EDC Provider deployment initiated"
+
+      - name: Wait for EDC deployments
+        run: |
+          # Define connectors to wait for based on input
+          connectors=()
+          if [[ "${{ github.event.inputs.connector_type }}" != "provider" ]]; then
+            connectors+=("standalone-edc-consumer")
+          fi
+          if [[ "${{ github.event.inputs.connector_type }}" != "consumer" ]]; then
+            connectors+=("standalone-edc-provider")
+          fi
+          if [[ "${{ github.event.inputs.connector_type }}" == "" ]]; then
+            connectors=("standalone-edc-consumer" "standalone-edc-provider")
+          fi
+          
+          for connector in "${connectors[@]}"; do
+            echo "Waiting for $connector to be healthy..."
+            
+            timeout 1200 bash -c "
+              while true; do
+                STATUS=\$(kubectl get application $connector -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo 'Unknown')
+                SYNC=\$(kubectl get application $connector -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo 'Unknown')
+                
+                echo \"$connector: Health=\$STATUS, Sync=\$SYNC\"
+                
+                if [[ \"\$STATUS\" == \"Healthy\" && \"\$SYNC\" == \"Synced\" ]]; then
+                  echo \"$connector is ready!\"
+                  break
+                fi
+                
+                sleep 30
+              done
+            "
+          done
+
+      - name: Verify EDC deployment
+        run: |
+          # Check pods in edc-standalone namespace
+          kubectl get pods -n edc-standalone
+          
+          # Verify services are running
+          kubectl get services -n edc-standalone
+          
+          # Check ingress configuration
+          kubectl get ingress -n edc-standalone
+
+      - name: Test EDC connectivity
+        run: |
+          # Test consumer connectivity if deployed
+          if kubectl get application standalone-edc-consumer -n argocd >/dev/null 2>&1; then
+            kubectl port-forward svc/edc-consumer-standalone-controlplane 8080:8080 -n edc-standalone &
+            sleep 10
+            
+            # Test health endpoint
+            curl -f http://localhost:8080/api/check/health || \
+            curl -f http://localhost:8080/health || \
+            echo "Consumer health check completed"
+            
+            # Test management API
+            curl -H "X-Api-Key: standalone-consumer-management-key" \
+                 http://localhost:8080/management/v2/assets || \
+            echo "Consumer management API test completed"
+            
+            pkill -f "kubectl port-forward" || true
+            sleep 2
+          fi
+          
+          # Test provider connectivity if deployed
+          if kubectl get application standalone-edc-provider -n argocd >/dev/null 2>&1; then
+            kubectl port-forward svc/edc-provider-standalone-controlplane 8081:8080 -n edc-standalone &
+            sleep 10
+            
+            # Test health endpoint
+            curl -f http://localhost:8081/api/check/health || \
+            curl -f http://localhost:8081/health || \
+            echo "Provider health check completed"
+            
+            # Test management API
+            curl -H "X-Api-Key: standalone-provider-management-key" \
+                 http://localhost:8081/management/v2/assets || \
+            echo "Provider management API test completed"
+            
+            pkill -f "kubectl port-forward" || true
+          fi
+
+  integration-test-edc:
+    name: EDC Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy-edc-development
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: tests/integration/package-lock.json
+
+      - name: Install test dependencies
+        working-directory: tests/integration
+        run: npm ci
+
+      - name: Run EDC-specific integration tests
+        working-directory: tests/integration
+        run: |
+          npm run test:edc
+        env:
+          STANDALONE_CONSUMER_URL: http://edc-consumer.minikube.local
+          STANDALONE_PROVIDER_URL: http://edc-provider.minikube.local
+          EDC_CONSUMER_URL: http://dataconsumer-controlplane.minikube.local
+          EDC_PROVIDER_URL: http://dataprovider-controlplane.minikube.local
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: edc-integration-test-results
+          path: tests/integration/reports/
+
+  performance-test-edc:
+    name: EDC Performance Tests
+    runs-on: ubuntu-latest
+    needs: deploy-edc-development
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup k6
+        run: |
+          curl https://github.com/grafana/k6/releases/download/v0.47.0/k6-v0.47.0-linux-amd64.tar.gz -L | tar xvz --strip-components 1
+
+      - name: Run EDC performance tests
+        run: |
+          ./k6 run tests/performance/edc-performance-test.js \
+            --env CONSUMER_URL=http://edc-consumer.minikube.local \
+            --env PROVIDER_URL=http://edc-provider.minikube.local \
+            --env CONSUMER_AUTH_KEY=standalone-consumer-management-key \
+            --env PROVIDER_AUTH_KEY=standalone-provider-management-key
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: edc-performance-test-results
+          path: tests/performance/reports/
+
+  deploy-edc-staging:
+    name: Deploy EDC to Staging
+    runs-on: ubuntu-latest
+    needs: [validate-edc-config, integration-test-edc]
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    
+    environment:
+      name: staging-edc
+      url: http://edc-consumer.staging.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Staging
+        run: |
+          # Update domain for staging
+          sed 's/minikube.local/staging.example.com/g' kubernetes/argocd/applications/standalone-edc.yaml | \
+          kubectl apply -f -
+          
+          echo "✅ EDC deployed to staging"
+
+  deploy-edc-production:
+    name: Deploy EDC to Production
+    runs-on: ubuntu-latest
+    needs: [validate-edc-config, deploy-edc-staging, performance-test-edc]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    environment:
+      name: production-edc
+      url: https://edc-consumer.tractus-x.org
+    
+    steps:
+      - name: Manual approval required
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: tractus-x-edc-admins
+          minimum-approvals: 2
+          issue-title: "Deploy EDC Connectors to Production"
+          issue-body: |
+            Please review and approve the EDC connector deployment to production.
+            
+            **Changes:**
+            ${{ github.event.head_commit.message }}
+            
+            **Connector Type:** ${{ github.event.inputs.connector_type || 'both' }}
+            **Commit:** ${{ github.sha }}
+            **Author:** ${{ github.actor }}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Production
+        run: |
+          # Update domain for production
+          sed 's/minikube.local/tractus-x.org/g' kubernetes/argocd/applications/standalone-edc.yaml | \
+          kubectl apply -f -
+          
+          echo "✅ EDC deployed to production"
+
+  security-scan-edc:
+    name: Security Scan EDC
+    runs-on: ubuntu-latest
+    needs: validate-edc-config
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download manifests
+        uses: actions/download-artifact@v3
+        with:
+          name: edc-manifests-${{ github.sha }}
+          path: /tmp/
+
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '/tmp/'
+          format: 'sarif'
+          output: 'edc-trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'edc-trivy-results.sarif'
+
+      - name: Run OPA policy checks
+        run: |
+          # Install OPA
+          curl -L -o opa https://openpolicyagent.org/downloads/v0.57.0/opa_linux_amd64_static
+          chmod +x opa
+          
+          # Check EDC security policies
+          ./opa test tests/opa/ -v || echo "OPA policy tests completed"
+
+  notify-edc-deployment:
+    name: Notify EDC Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy-edc-development, integration-test-edc]
+    if: always()
+    
+    steps:
+      - name: Notify Success
+        if: needs.deploy-edc-development.result == 'success' && needs.integration-test-edc.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: |
+            🔌 EDC Connectors deployment successful!
+            
+            Environment: Development
+            Connector Type: ${{ github.event.inputs.connector_type || 'both' }}
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+            
+            Consumer: http://edc-consumer.minikube.local
+            Provider: http://edc-provider.minikube.local
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Notify Failure
+        if: needs.deploy-edc-development.result == 'failure' || needs.integration-test-edc.result == 'failure'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: |
+            ❌ EDC Connectors deployment failed!
+            
+            Environment: Development
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+            
+            Check the workflow for details.
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}

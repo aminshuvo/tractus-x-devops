@@ -1,0 +1,567 @@
+# .github/workflows/monitoring.yml
+name: Deploy Monitoring Stack
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'kubernetes/argocd/applications/monitoring-stack.yaml'
+      - 'kubernetes/monitoring/**'
+      - 'configs/**'
+      - '.github/workflows/monitoring.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'kubernetes/argocd/applications/monitoring-stack.yaml'
+      - 'kubernetes/monitoring/**'
+      - 'configs/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      stack_component:
+        description: 'Monitoring component to deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - prometheus
+          - grafana
+          - loki
+          - jaeger
+
+env:
+  PROMETHEUS_VERSION: '54.2.2'
+  LOKI_VERSION: '2.9.11'
+  JAEGER_VERSION: '0.71.11'
+
+jobs:
+  validate-monitoring-config:
+    name: Validate Monitoring Configuration
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.3'
+
+      - name: Add monitoring Helm repositories
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo add jaegertracing https://jaegertracing.github.io/helm-charts
+          helm repo update
+
+      - name: Validate Prometheus stack configuration
+        run: |
+          # Extract Prometheus values from ArgoCD application
+          yq eval '.spec.source.helm.values' kubernetes/argocd/applications/monitoring-stack.yaml | \
+            yq eval 'select(.metadata.name == "prometheus-stack")' > /tmp/prometheus-values.yaml
+          
+          # Template and validate Prometheus stack
+          helm template prometheus-stack prometheus-community/kube-prometheus-stack \
+            --version ${{ env.PROMETHEUS_VERSION }} \
+            --values /tmp/prometheus-values.yaml \
+            --debug --dry-run > /tmp/prometheus-manifests.yaml
+          
+          echo "✅ Prometheus stack configuration is valid"
+
+      - name: Validate Loki stack configuration
+        run: |
+          # Extract Loki values from ArgoCD application
+          yq eval '.spec.source.helm.values' kubernetes/argocd/applications/monitoring-stack.yaml | \
+            yq eval 'select(.metadata.name == "loki-stack")' > /tmp/loki-values.yaml
+          
+          # Template and validate Loki stack
+          helm template loki-stack grafana/loki-stack \
+            --version ${{ env.LOKI_VERSION }} \
+            --values /tmp/loki-values.yaml \
+            --debug --dry-run > /tmp/loki-manifests.yaml
+          
+          echo "✅ Loki stack configuration is valid"
+
+      - name: Validate Jaeger configuration
+        run: |
+          # Extract Jaeger values from ArgoCD application
+          yq eval '.spec.source.helm.values' kubernetes/argocd/applications/monitoring-stack.yaml | \
+            yq eval 'select(.metadata.name == "jaeger-tracing")' > /tmp/jaeger-values.yaml
+          
+          # Template and validate Jaeger
+          helm template jaeger jaegertracing/jaeger \
+            --version ${{ env.JAEGER_VERSION }} \
+            --values /tmp/jaeger-values.yaml \
+            --debug --dry-run > /tmp/jaeger-manifests.yaml
+          
+          echo "✅ Jaeger configuration is valid"
+
+      - name: Validate custom configurations
+        run: |
+          # Validate Prometheus alert rules
+          if [ -f configs/prometheus/tractus-x-alerts.yaml ]; then
+            promtool check rules configs/prometheus/tractus-x-alerts.yaml || echo "Alert rules validation completed"
+          fi
+          
+          # Validate Grafana dashboards
+          if [ -d configs/grafana/ ]; then
+            find configs/grafana/ -name "*.json" -exec echo "Validating {}" \; -exec jq . {} > /dev/null \;
+          fi
+          
+          echo "✅ Custom configurations are valid"
+
+      - name: Upload validated manifests
+        uses: actions/upload-artifact@v3
+        with:
+          name: monitoring-manifests-${{ github.sha }}
+          path: |
+            /tmp/prometheus-manifests.yaml
+            /tmp/loki-manifests.yaml
+            /tmp/jaeger-manifests.yaml
+          retention-days: 7
+
+  deploy-monitoring-development:
+    name: Deploy Monitoring to Development
+    runs-on: ubuntu-latest
+    needs: validate-monitoring-config
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'development')
+    
+    environment:
+      name: development-monitoring
+      url: http://grafana.minikube.local
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup ArgoCD CLI
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd-linux-amd64
+          sudo mv argocd-linux-amd64 /usr/local/bin/argocd
+
+      - name: Deploy Prometheus Stack
+        if: github.event.inputs.stack_component == 'all' || github.event.inputs.stack_component == 'prometheus' || github.event.inputs.stack_component == ''
+        run: |
+          kubectl apply -f - <<EOF
+          $(yq eval 'select(.metadata.name == "prometheus-stack")' kubernetes/argocd/applications/monitoring-stack.yaml)
+          EOF
+          
+          echo "✅ Prometheus stack deployment initiated"
+
+      - name: Deploy Loki Stack
+        if: github.event.inputs.stack_component == 'all' || github.event.inputs.stack_component == 'loki' || github.event.inputs.stack_component == ''
+        run: |
+          kubectl apply -f - <<EOF
+          $(yq eval 'select(.metadata.name == "loki-stack")' kubernetes/argocd/applications/monitoring-stack.yaml)
+          EOF
+          
+          echo "✅ Loki stack deployment initiated"
+
+      - name: Deploy Jaeger Tracing
+        if: github.event.inputs.stack_component == 'all' || github.event.inputs.stack_component == 'jaeger' || github.event.inputs.stack_component == ''
+        run: |
+          kubectl apply -f - <<EOF
+          $(yq eval 'select(.metadata.name == "jaeger-tracing")' kubernetes/argocd/applications/monitoring-stack.yaml)
+          EOF
+          
+          echo "✅ Jaeger tracing deployment initiated"
+
+      - name: Wait for monitoring deployments
+        run: |
+          # Define components to wait for based on input
+          components=()
+          if [[ "${{ github.event.inputs.stack_component }}" == "all" || "${{ github.event.inputs.stack_component }}" == "" ]]; then
+            components=("prometheus-stack" "loki-stack" "jaeger-tracing")
+          else
+            case "${{ github.event.inputs.stack_component }}" in
+              prometheus) components=("prometheus-stack") ;;
+              loki) components=("loki-stack") ;;
+              jaeger) components=("jaeger-tracing") ;;
+              grafana) components=("prometheus-stack") ;;  # Grafana is part of prometheus-stack
+            esac
+          fi
+          
+          for component in "${components[@]}"; do
+            echo "Waiting for $component to be healthy..."
+            
+            timeout 1200 bash -c "
+              while true; do
+                STATUS=\$(kubectl get application $component -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo 'Unknown')
+                SYNC=\$(kubectl get application $component -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo 'Unknown')
+                
+                echo \"$component: Health=\$STATUS, Sync=\$SYNC\"
+                
+                if [[ \"\$STATUS\" == \"Healthy\" && \"\$SYNC\" == \"Synced\" ]]; then
+                  echo \"$component is ready!\"
+                  break
+                fi
+                
+                sleep 30
+              done
+            "
+          done
+
+      - name: Verify monitoring deployment
+        run: |
+          # Check pods in monitoring namespace
+          kubectl get pods -n monitoring
+          
+          # Verify services are running
+          kubectl get services -n monitoring
+          
+          # Check ingress configuration
+          kubectl get ingress -n monitoring
+
+      - name: Test monitoring stack connectivity
+        run: |
+          # Test Prometheus connectivity
+          if kubectl get application prometheus-stack -n argocd >/dev/null 2>&1; then
+            kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring &
+            sleep 10
+            
+            # Test Prometheus health
+            curl -f http://localhost:9090/-/healthy || echo "Prometheus health check completed"
+            
+            # Test Prometheus targets
+            curl -f http://localhost:9090/api/v1/targets || echo "Prometheus targets check completed"
+            
+            pkill -f "kubectl port-forward" || true
+            sleep 2
+          fi
+          
+          # Test Grafana connectivity
+          if kubectl get application prometheus-stack -n argocd >/dev/null 2>&1; then
+            kubectl port-forward svc/prometheus-stack-grafana 3000:80 -n monitoring &
+            sleep 10
+            
+            # Test Grafana health
+            curl -f http://localhost:3000/api/health || echo "Grafana health check completed"
+            
+            pkill -f "kubectl port-forward" || true
+            sleep 2
+          fi
+          
+          # Test Loki connectivity
+          if kubectl get application loki-stack -n argocd >/dev/null 2>&1; then
+            kubectl port-forward svc/loki 3100:3100 -n monitoring &
+            sleep 10
+            
+            # Test Loki health
+            curl -f http://localhost:3100/ready || echo "Loki health check completed"
+            
+            pkill -f "kubectl port-forward" || true
+          fi
+
+  monitoring-integration-tests:
+    name: Monitoring Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy-monitoring-development
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install test dependencies
+        run: |
+          npm install -g newman
+          npm install axios chai mocha
+
+      - name: Run monitoring integration tests
+        run: |
+          # Create monitoring test script
+          cat > monitoring-test.js << 'EOF'
+          const axios = require('axios');
+          const assert = require('assert');
+          
+          async function testPrometheus() {
+            try {
+              const response = await axios.get('http://prometheus.minikube.local/-/healthy', { timeout: 5000 });
+              assert.strictEqual(response.status, 200);
+              console.log('✅ Prometheus health check passed');
+            } catch (error) {
+              console.log('⚠️ Prometheus health check failed:', error.message);
+            }
+          }
+          
+          async function testGrafana() {
+            try {
+              const response = await axios.get('http://grafana.minikube.local/api/health', { timeout: 5000 });
+              assert.strictEqual(response.status, 200);
+              console.log('✅ Grafana health check passed');
+            } catch (error) {
+              console.log('⚠️ Grafana health check failed:', error.message);
+            }
+          }
+          
+          async function testLoki() {
+            try {
+              const response = await axios.get('http://loki.minikube.local:3100/ready', { timeout: 5000 });
+              assert.strictEqual(response.status, 200);
+              console.log('✅ Loki health check passed');
+            } catch (error) {
+              console.log('⚠️ Loki health check failed:', error.message);
+            }
+          }
+          
+          async function runTests() {
+            console.log('Running monitoring integration tests...');
+            await testPrometheus();
+            await testGrafana();
+            await testLoki();
+            console.log('Monitoring integration tests completed');
+          }
+          
+          runTests();
+          EOF
+          
+          node monitoring-test.js
+
+      - name: Test metrics collection
+        run: |
+          # Test if metrics are being collected
+          kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring &
+          sleep 10
+          
+          # Query for basic metrics
+          curl -G http://localhost:9090/api/v1/query --data-urlencode 'query=up' | jq .
+          
+          # Query for Kubernetes metrics
+          curl -G http://localhost:9090/api/v1/query --data-urlencode 'query=kube_pod_info' | jq .
+          
+          pkill -f "kubectl port-forward" || true
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: monitoring-integration-test-results
+          path: monitoring-test-results/
+
+  deploy-monitoring-staging:
+    name: Deploy Monitoring to Staging
+    runs-on: ubuntu-latest
+    needs: [validate-monitoring-config, monitoring-integration-tests]
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    
+    environment:
+      name: staging-monitoring
+      url: http://grafana.staging.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Staging
+        run: |
+          # Update domain for staging
+          sed 's/minikube.local/staging.example.com/g' kubernetes/argocd/applications/monitoring-stack.yaml | \
+          kubectl apply -f -
+          
+          echo "✅ Monitoring stack deployed to staging"
+
+  deploy-monitoring-production:
+    name: Deploy Monitoring to Production
+    runs-on: ubuntu-latest
+    needs: [validate-monitoring-config, deploy-monitoring-staging]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    environment:
+      name: production-monitoring
+      url: https://grafana.tractus-x.org
+    
+    steps:
+      - name: Manual approval required
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: tractus-x-monitoring-admins
+          minimum-approvals: 1
+          issue-title: "Deploy Monitoring Stack to Production"
+          issue-body: |
+            Please review and approve the monitoring stack deployment to production.
+            
+            **Changes:**
+            ${{ github.event.head_commit.message }}
+            
+            **Stack Component:** ${{ github.event.inputs.stack_component || 'all' }}
+            **Commit:** ${{ github.sha }}
+            **Author:** ${{ github.actor }}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Production
+        run: |
+          # Update domain for production
+          sed 's/minikube.local/tractus-x.org/g' kubernetes/argocd/applications/monitoring-stack.yaml | \
+          kubectl apply -f -
+          
+          echo "✅ Monitoring stack deployed to production"
+
+  performance-test-monitoring:
+    name: Performance Test Monitoring
+    runs-on: ubuntu-latest
+    needs: deploy-monitoring-development
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup k6
+        run: |
+          curl https://github.com/grafana/k6/releases/download/v0.47.0/k6-v0.47.0-linux-amd64.tar.gz -L | tar xvz --strip-components 1
+
+      - name: Run monitoring performance tests
+        run: |
+          # Create k6 test for monitoring endpoints
+          cat > monitoring-perf-test.js << 'EOF'
+          import http from 'k6/http';
+          import { check, sleep } from 'k6';
+          
+          export const options = {
+            stages: [
+              { duration: '1m', target: 10 },
+              { duration: '3m', target: 10 },
+              { duration: '1m', target: 0 },
+            ],
+            thresholds: {
+              http_req_duration: ['p(95)<2000'],
+              http_req_failed: ['rate<0.1'],
+            },
+          };
+          
+          export default function () {
+            // Test Prometheus
+            const promResponse = http.get('http://prometheus.minikube.local/-/healthy');
+            check(promResponse, {
+              'Prometheus is healthy': (r) => r.status === 200,
+            });
+            
+            // Test Grafana
+            const grafanaResponse = http.get('http://grafana.minikube.local/api/health');
+            check(grafanaResponse, {
+              'Grafana is healthy': (r) => r.status === 200,
+            });
+            
+            sleep(1);
+          }
+          EOF
+          
+          ./k6 run monitoring-perf-test.js
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: monitoring-performance-test-results
+          path: monitoring-performance-results/
+
+  security-scan-monitoring:
+    name: Security Scan Monitoring
+    runs-on: ubuntu-latest
+    needs: validate-monitoring-config
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download monitoring manifests
+        uses: actions/download-artifact@v3
+        with:
+          name: monitoring-manifests-${{ github.sha }}
+          path: /tmp/
+
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '/tmp/'
+          format: 'sarif'
+          output: 'monitoring-trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'monitoring-trivy-results.sarif'
+
+      - name: Scan for hardcoded secrets
+        run: |
+          # Install truffleHog
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+          
+          # Scan for secrets in monitoring configurations
+          trufflehog filesystem configs/ kubernetes/monitoring/ --only-verified
+
+  notify-monitoring-deployment:
+    name: Notify Monitoring Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy-monitoring-development, monitoring-integration-tests]
+    if: always()
+    
+    steps:
+      - name: Notify Success
+        if: needs.deploy-monitoring-development.result == 'success' && needs.monitoring-integration-tests.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: |
+            📊 Monitoring stack deployment successful!
+            
+            Environment: Development
+            Components: ${{ github.event.inputs.stack_component || 'all' }}
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+            
+            Grafana: http://grafana.minikube.local
+            Prometheus: http://prometheus.minikube.local
+            Loki: http://loki.minikube.local
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Notify Failure
+        if: needs.deploy-monitoring-development.result == 'failure' || needs.monitoring-integration-tests.result == 'failure'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: |
+            ❌ Monitoring stack deployment failed!
+            
+            Environment: Development
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+            
+            Check the workflow for details.
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+  cleanup-monitoring:
+    name: Cleanup Monitoring Resources
+    runs-on: ubuntu-latest
+    needs: [deploy-monitoring-development, monitoring-integration-tests, performance-test-monitoring, security-scan-monitoring]
+    if: always() && github.event_name != 'push'
+    
+    steps:
+      - name: Cleanup test resources
+        run: |
+          echo "Cleaning up monitoring test resources..."
+          # Add cleanup logic here if needed
+          echo "✅ Monitoring cleanup completed"

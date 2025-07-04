@@ -1,0 +1,88 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "edc-connector",
+    "title": "EDC Connector Dashboard",
+    "tags": ["edc", "dataspace", "connector"],
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "EDC Control Plane Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"tractus-x-edc\", component=\"control-plane\"}",
+            "legendFormat": "Control Plane"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "EDC Data Plane Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"tractus-x-edc\", component=\"data-plane\"}",
+            "legendFormat": "Data Plane"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Contract Negotiations",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(edc_contract_negotiations_total[5m]))",
+            "legendFormat": "Negotiations per second"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6}
+      },
+      {
+        "id": 4,
+        "title": "Data Transfers",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(edc_data_transfers_total[5m]))",
+            "legendFormat": "Transfers per second"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6}
+      },
+      {
+        "id": 5,
+        "title": "Policy Evaluations",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(edc_policy_evaluations_total[5m])) by (result)",
+            "legendFormat": "{{result}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14}
+      },
+      {
+        "id": 6,
+        "title": "Catalog Requests",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(edc_catalog_requests_total[5m]))",
+            "legendFormat": "Catalog requests per second"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14}
+      }
+    ]
+  }
+}

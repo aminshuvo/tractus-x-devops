@@ -1,0 +1,543 @@
+# kubernetes/argocd/applications/monitoring-stack.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prometheus-stack
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: prometheus-stack
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: tractus-x
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: "54.2.2"
+    helm:
+      releaseName: prometheus-stack
+      values: |
+        fullnameOverride: "prometheus"
+        
+        # Prometheus Configuration
+        prometheus:
+          enabled: true
+          prometheusSpec:
+            replicas: 1
+            retention: 15d
+            retentionSize: "10GB"
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: standard
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 15Gi
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+            serviceMonitorSelectorNilUsesHelmValues: false
+            ruleSelectorNilUsesHelmValues: false
+            
+            # Scrape configs for Tractus-X components
+            additionalScrapeConfigs:
+              - job_name: 'tractus-x-umbrella'
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names: ['tractus-x']
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                    action: keep
+                    regex: true
+                  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                    action: replace
+                    target_label: __metrics_path__
+                    regex: (.+)
+                  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                    action: replace
+                    regex: ([^:]+)(?::\d+)?;(\d+)
+                    replacement: $1:$2
+                    target_label: __address__
+              
+              - job_name: 'edc-standalone'
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names: ['edc-standalone']
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                    action: keep
+                    regex: true
+                  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                    action: replace
+                    target_label: __metrics_path__
+                    regex: (.+)
+                  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                    action: replace
+                    regex: ([^:]+)(?::\d+)?;(\d+)
+                    replacement: $1:$2
+                    target_label: __address__
+          
+          ingress:
+            enabled: true
+            ingressClassName: nginx
+            annotations:
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            hosts:
+              - prometheus.minikube.local
+            paths:
+              - /
+        
+        # Grafana Configuration
+        grafana:
+          enabled: true
+          defaultDashboardsEnabled: true
+          defaultDashboardsTimezone: UTC
+          
+          adminPassword: tractus-admin
+          
+          persistence:
+            enabled: true
+            storageClassName: standard
+            size: 5Gi
+          
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          
+          ingress:
+            enabled: true
+            ingressClassName: nginx
+            annotations:
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            hosts:
+              - grafana.minikube.local
+            paths:
+              - /
+          
+          # Additional data sources
+          additionalDataSources:
+            - name: Loki
+              type: loki
+              url: http://loki:3100
+              access: proxy
+              isDefault: false
+          
+          # Grafana configuration
+          grafana.ini:
+            server:
+              domain: grafana.minikube.local
+              root_url: http://grafana.minikube.local
+            security:
+              allow_embedding: true
+            auth.anonymous:
+              enabled: true
+              org_role: Viewer
+            dashboards:
+              default_home_dashboard_path: /var/lib/grafana/dashboards/default/tractus-x-overview.json
+          
+          # Dashboard providers
+          dashboardProviders:
+            dashboardproviders.yaml:
+              apiVersion: 1
+              providers:
+                - name: 'tractus-x'
+                  orgId: 1
+                  folder: 'Tractus-X'
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/tractus-x
+                - name: 'edc'
+                  orgId: 1
+                  folder: 'EDC Connectors'
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/edc
+          
+          # Custom dashboards
+          dashboards:
+            tractus-x:
+              tractus-x-overview:
+                gnetId: 15661
+                revision: 1
+                datasource: Prometheus
+            edc:
+              edc-connector-overview:
+                gnetId: 15662
+                revision: 1
+                datasource: Prometheus
+        
+        # AlertManager Configuration
+        alertmanager:
+          enabled: true
+          alertmanagerSpec:
+            replicas: 1
+            storage:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: standard
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 5Gi
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "200m"
+          
+          ingress:
+            enabled: true
+            ingressClassName: nginx
+            annotations:
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            hosts:
+              - alertmanager.minikube.local
+            paths:
+              - /
+          
+          config:
+            global:
+              smtp_smarthost: 'localhost:587'
+              smtp_from: 'alertmanager@tractus-x.local'
+            route:
+              group_by: ['alertname']
+              group_wait: 10s
+              group_interval: 10s
+              repeat_interval: 1h
+              receiver: 'web.hook'
+            receivers:
+              - name: 'web.hook'
+                webhook_configs:
+                  - url: 'http://webhook-handler:5000/webhook'
+        
+        # Node Exporter
+        nodeExporter:
+          enabled: true
+          
+        # Kube State Metrics
+        kubeStateMetrics:
+          enabled: true
+        
+        # Prometheus Operator
+        prometheusOperator:
+          enabled: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki-stack
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: loki-stack
+    app.kubernetes.io/component: logging
+    app.kubernetes.io/part-of: observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: tractus-x
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: loki-stack
+    targetRevision: "2.9.11"
+    helm:
+      releaseName: loki-stack
+      values: |
+        # Loki Configuration
+        loki:
+          enabled: true
+          persistence:
+            enabled: true
+            storageClassName: standard
+            size: 10Gi
+          
+          config:
+            auth_enabled: false
+            server:
+              http_listen_port: 3100
+            ingester:
+              lifecycler:
+                address: 127.0.0.1
+                ring:
+                  kvstore:
+                    store: inmemory
+                  replication_factor: 1
+                final_sleep: 0s
+              chunk_idle_period: 1h
+              max_chunk_age: 1h
+              chunk_target_size: 1048576
+              chunk_retain_period: 30s
+            schema_config:
+              configs:
+                - from: 2020-10-24
+                  store: boltdb-shipper
+                  object_store: filesystem
+                  schema: v11
+                  index:
+                    prefix: index_
+                    period: 24h
+            storage_config:
+              boltdb_shipper:
+                active_index_directory: /loki/boltdb-shipper-active
+                cache_location: /loki/boltdb-shipper-cache
+                cache_ttl: 24h
+                shared_store: filesystem
+              filesystem:
+                directory: /loki/chunks
+            limits_config:
+              enforce_metric_name: false
+              reject_old_samples: true
+              reject_old_samples_max_age: 168h
+              retention_period: 168h
+          
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+        
+        # Promtail Configuration
+        promtail:
+          enabled: true
+          config:
+            server:
+              http_listen_port: 3101
+              grpc_listen_port: 0
+            positions:
+              filename: /tmp/positions.yaml
+            clients:
+              - url: http://loki:3100/loki/api/v1/push
+            scrape_configs:
+              - job_name: kubernetes-pods
+                kubernetes_sd_configs:
+                  - role: pod
+                relabel_configs:
+                  - source_labels:
+                      - __meta_kubernetes_pod_controller_name
+                    regex: ([0-9a-z-.]+?)(-[0-9a-f]{8,10})?
+                    action: replace
+                    target_label: __tmp_controller_name
+                  - source_labels:
+                      - __meta_kubernetes_pod_label_app_kubernetes_io_name
+                      - __meta_kubernetes_pod_label_app
+                      - __tmp_controller_name
+                      - __meta_kubernetes_pod_name
+                    regex: ^;*([^;]+)(;.*)?$
+                    action: replace
+                    target_label: app
+                  - source_labels:
+                      - __meta_kubernetes_pod_label_app_kubernetes_io_component
+                      - __meta_kubernetes_pod_label_component
+                    regex: ^;*([^;]+)(;.*)?$
+                    action: replace
+                    target_label: component
+                  - action: replace
+                    source_labels:
+                    - __meta_kubernetes_pod_node_name
+                    target_label: node_name
+                  - action: replace
+                    source_labels:
+                    - __meta_kubernetes_namespace
+                    target_label: namespace
+                  - action: replace
+                    replacement: $1
+                    separator: /
+                    source_labels:
+                    - namespace
+                    - app
+                    target_label: job
+                  - action: replace
+                    source_labels:
+                    - __meta_kubernetes_pod_name
+                    target_label: pod
+                  - action: replace
+                    source_labels:
+                    - __meta_kubernetes_pod_container_name
+                    target_label: container
+                  - action: replace
+                    replacement: /var/log/pods/*$1/*.log
+                    separator: /
+                    source_labels:
+                    - __meta_kubernetes_pod_uid
+                    - __meta_kubernetes_pod_container_name
+                    target_label: __path__
+                  - action: replace
+                    regex: true/(.*)
+                    replacement: /var/log/pods/*$1/*.log
+                    separator: /
+                    source_labels:
+                    - __meta_kubernetes_pod_annotationpresent_kubernetes_io_config_hash
+                    - __meta_kubernetes_pod_annotation_kubernetes_io_config_hash
+                    - __meta_kubernetes_pod_container_name
+                    target_label: __path__
+          
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+        
+        # Fluent Bit (alternative log shipper)
+        fluent-bit:
+          enabled: false
+        
+        # Grafana (disabled here as it's managed by prometheus-stack)
+        grafana:
+          enabled: false
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jaeger-tracing
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: jaeger-tracing
+    app.kubernetes.io/component: tracing
+    app.kubernetes.io/part-of: observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: tractus-x
+  source:
+    repoURL: https://jaegertracing.github.io/helm-charts
+    chart: jaeger
+    targetRevision: "0.71.11"
+    helm:
+      releaseName: jaeger
+      values: |
+        provisionDataStore:
+          cassandra: false
+          elasticsearch: false
+        
+        storage:
+          type: memory
+        
+        allInOne:
+          enabled: true
+          image: jaegertracing/all-in-one:1.49
+          
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          
+          ingress:
+            enabled: true
+            ingressClassName: nginx
+            annotations:
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            hosts:
+              - jaeger.minikube.local
+            paths:
+              - /
+        
+        agent:
+          enabled: false
+        
+        collector:
+          enabled: false
+        
+        query:
+          enabled: false
+        
+        hotrod:
+          enabled: false
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
