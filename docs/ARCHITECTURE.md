@@ -971,4 +971,3 @@ Multi-Zone Deployment:
 
 ---
 
-This architecture documentation should be updated as the system evolves and new components are added or existing ones are modified. Regular architecture reviews should be conducted to ensure the design continues to meet business requirements and technical constraints.

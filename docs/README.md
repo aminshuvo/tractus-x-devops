@@ -113,7 +113,7 @@ tractus-x-devops/
 │   ├── integration/           # Integration tests
 │   ├── e2e/                   # End-to-end tests
 │   └── performance/           # Performance tests
-└── /                # Documentation
+└── docs/                # Documentation
     ├── README.md              # Main documentation
     ├── SETUP.md               # Setup instructions
     ├── OPERATIONAL-PLAYBOOK.md # Operations guide
@@ -279,16 +279,16 @@ Environment-specific configurations are managed through:
    ```
 
 ### Getting Help
-- Check the [Troubleshooting Guide](/TROUBLESHOOTING.md)
+- Check the [Troubleshooting Guide](TROUBLESHOOTING.md)
 - Review application logs using Grafana/Loki
 - Examine Prometheus alerts for system issues
 
 ## 📚 Documentation
 
-- [Setup Instructions](/SETUP.md) - Detailed setup and configuration
-- [Operational Playbook](/OPERATIONAL-PLAYBOOK.md) - Production operations guide
-- [Architecture Documentation](/ARCHITECTURE.md) - System architecture and design
-- [Troubleshooting Guide](/TROUBLESHOOTING.md) - Common issues and solutions
+- [Setup Instructions](SETUP.md) - Detailed setup and configuration
+- [Operational Playbook](OPERATIONAL-PLAYBOOK.md) - Production operations guide
+- [Architecture Documentation](ARCHITECTURE.md) - System architecture and design
+- [Troubleshooting Guide](TROUBLESHOOTING.md) - Common issues and solutions
 
 ## 🤝 Contributing
 
@@ -320,7 +320,7 @@ This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE
 
 For support and questions:
 - Create an issue in this repository
-- Check the documentation in the `/` directory
+- Check the documentation in the `docs/` directory
 - Review existing issues for similar problems
 
 ## 🏷️ Version Information
@@ -446,4 +446,4 @@ ARGOCD_TARGET_REVISION=HEAD
 
 ---
 
-**Note**: This deployment is designed for development and testing purposes. For production deployments, please review the [Operational Playbook](/OPERATIONAL-PLAYBOOK.md) for additional security and reliability considerations.
+**Note**: This deployment is designed for development and testing purposes. For production deployments, please review the [Operational Playbook](OPERATIONAL-PLAYBOOK.md) for additional security and reliability considerations.

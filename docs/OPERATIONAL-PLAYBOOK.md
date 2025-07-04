@@ -1298,5 +1298,3 @@ echo "Handoff complete"
 | Dashboard Load Time | < 3 seconds | Initial page load |
 
 ---
-
-This playbook should be reviewed and updated quarterly to ensure it remains current with the deployed infrastructure and operational procedures. All team members should be familiar with the procedures outlined in this document.
